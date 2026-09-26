@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -36,11 +37,59 @@ def command_smoke() -> None:
             raise SystemExit(1)
 
 
+def command_verify_export(args: argparse.Namespace) -> None:
+    """离线核验导出包：篡改、缺页、摘要不一致都会定位到具体记录。"""
+    from app.exports.verification import verify_bundle
+
+    receipt = None
+    if args.receipt:
+        receipt = json.loads(Path(args.receipt).read_text(encoding="utf-8"))
+    report = verify_bundle(Path(args.path), receipt=receipt)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    if not report.to_dict()["ok"]:
+        raise SystemExit(1)
+
+
+def command_run_export_jobs(args: argparse.Namespace) -> None:
+    """以前台工作进程方式领取并执行审计导出任务。"""
+    from app.exports.service import WORKER_NAME, AuditExportService
+
+    init_db()
+    worker = args.worker or WORKER_NAME
+    processed = 0
+    while True:
+        service = AuditExportService(get_connection())
+        result = service.run_next(worker)
+        if result is None:
+            break
+        processed += 1
+        print(json.dumps(result, ensure_ascii=False, default=str))
+        if args.once:
+            break
+    print(json.dumps({"processed": processed, "worker": worker}, ensure_ascii=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="知识产权档案服务维护命令")
-    parser.add_argument("command", choices=("init-db", "check-db", "smoke"))
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("init-db")
+    sub.add_parser("check-db")
+    sub.add_parser("smoke")
+    verify = sub.add_parser("verify-export", help="离线核验审计导出包")
+    verify.add_argument("path", help="导出包 .tar 路径或解包目录")
+    verify.add_argument("--receipt", help="可信回执 JSON 路径（来自 /receipt 接口）", default=None)
+    runner = sub.add_parser("run-export-jobs", help="领取并执行审计导出任务")
+    runner.add_argument("--worker", default=None, help="执行者标识（默认 audit-export-worker）")
+    runner.add_argument("--once", action="store_true", help="只执行一个任务")
     args = parser.parse_args()
-    {"init-db": command_init, "check-db": command_check, "smoke": command_smoke}[args.command]()
+    handlers = {
+        "init-db": lambda: command_init(),
+        "check-db": lambda: command_check(),
+        "smoke": lambda: command_smoke(),
+        "verify-export": lambda: command_verify_export(args),
+        "run-export-jobs": lambda: command_run_export_jobs(args),
+    }
+    handlers[args.command]()
 
 
 if __name__ == "__main__":

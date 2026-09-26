@@ -14,6 +14,7 @@
 - 双人审批：合规处置、敏感库位解密等高风险操作要求申请人与审批人分离，并累计不同审批人的决定。
 - 泄密事件追踪：事件可以关联档案或移交批次，保存严重度、调查状态和处置结果。
 - 审计与任务：关键身份及业务操作留痕，后台任务支持去重、领取与完成。
+- 审计导出：按时间、项目、事件类型和角色（内审/法务/研发负责人）生成分级字段视图；导出前固定查询快照并逐页计算摘要；同一筛选条件重复提交自动复用结果；任务支持领取、失败重试与下载核验；导出包固化生成时的规则版本，篡改、缺页、摘要不一致均可被离线命令或 HTTP 接口检出并定位到具体事件。受限库位、个人联系方式与未公开专利内容不会进入无权角色的导出包。
 
 ## 运行环境
 
@@ -61,3 +62,42 @@ python -m compileall -q app tests
 ```bash
 python -m app.cli smoke
 ```
+
+## 审计导出
+
+申请导出（`profile` 为 `internal_audit`、`legal` 或 `research_lead`，筛选条件可选 `events_from`、`events_to`、`project_codes`、`event_types`）：
+
+```bash
+curl -X POST http://localhost:8000/api/audit-exports \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"profile": "internal_audit", "project_codes": ["PATENT-A"], "events_from": "2026-01-01T00:00:00+00:00"}'
+```
+
+每个角色视图由独立权限控制（`audit.export.internal_audit`、`audit.export.legal`、`audit.export.research_lead`）。相同角色与筛选条件重复提交会复用未完成或已完成的结果；失败的任务可通过 `POST /api/audit-exports/{id}/retry` 重试。
+
+执行导出任务（二选一）：
+
+```bash
+# HTTP：由具备 jobs.run 权限的账号逐个领取执行
+curl -X POST http://localhost:8000/api/system/jobs/run-exports -H "Authorization: Bearer $TOKEN"
+# CLI：前台工作进程，执行队列中全部导出任务
+python -m app.cli run-export-jobs
+```
+
+下载与核验：
+
+```bash
+# 下载导出包（响应头 X-Export-Sha256 / X-Export-Root-Hash 携带登记摘要）
+curl -OJ http://localhost:8000/api/audit-exports/1/download -H "Authorization: Bearer $TOKEN"
+# 获取可信回执，供离线交叉核验
+curl http://localhost:8000/api/audit-exports/1/receipt -H "Authorization: Bearer $TOKEN" > receipt.json
+# HTTP 核验服务端文件或上传的离线包
+curl http://localhost:8000/api/audit-exports/1/verify -H "Authorization: Bearer $TOKEN"
+curl -X POST http://localhost:8000/api/audit-exports/verify-upload \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" \
+  --data-binary @AEXP-xxx.tar
+# 离线核验（不依赖服务在线；--receipt 可选）
+python -m app.cli verify-export AEXP-xxx.tar --receipt receipt.json
+```
+
+导出包为 tar 文件，内含 `manifest.json`（清单：规则版本、快照水位、分页摘要、根哈希）与 `pages/page-*.json`（分页记录，逐条带 SHA-256 摘要并串成哈希链）。核验会发现并定位：记录篡改（`RECORD_DIGEST_MISMATCH`，含档案事件 id）、缺页（`PAGE_MISSING`）、整包/根哈希与登记摘要不一致（`RECEIPT_MISMATCH`）等问题。导出文件默认保存在数据库同级 `exports/` 目录，可用 `ARCHIVE_EXPORT_DIR` 指定其他位置。

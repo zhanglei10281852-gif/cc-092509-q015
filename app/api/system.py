@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from app.api.dependencies import current_principal
 from app.core.security import Principal
 from app.database import get_connection, transaction
+from app.exports.service import AuditExportService
 from app.services.jobs import JobService
 
 router = APIRouter(prefix="/api/system", tags=["系统运维"])
@@ -23,3 +24,14 @@ def enqueue_example(principal: Principal = Depends(current_principal)) -> dict:
     principal.require("jobs.run")
     with transaction(immediate=True) as connection:
         return JobService(connection).enqueue("system.example", f"example:{principal.user_id}", {"actor": principal.user_id})
+
+
+@router.post("/jobs/run-exports")
+def run_export_jobs(principal: Principal = Depends(current_principal)) -> dict:
+    """领取并执行一个审计导出任务；无可领取任务时返回 claimed=false。"""
+    principal.require("jobs.run")
+    with transaction(immediate=True) as connection:
+        result = AuditExportService(connection).run_next(f"api-worker:{principal.user_id}")
+    if result is None:
+        return {"claimed": False}
+    return {"claimed": True, **result}

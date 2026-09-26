@@ -335,6 +335,36 @@ CREATE TABLE IF NOT EXISTS dossier_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dossier_events_dossier ON dossier_events(dossier_id, id);
+
+CREATE TABLE IF NOT EXISTS audit_exports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    export_code TEXT NOT NULL UNIQUE,
+    requested_by INTEGER NOT NULL REFERENCES users(id),
+    profile TEXT NOT NULL CHECK(profile IN ('internal_audit','legal','research_lead')),
+    criteria_json TEXT NOT NULL,
+    criteria_fingerprint TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed')),
+    job_id INTEGER REFERENCES background_jobs(id),
+    enqueued_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_at TEXT,
+    snapshot_max_event_id INTEGER,
+    snapshot_max_incident_id INTEGER,
+    snapshot_max_audit_event_id INTEGER,
+    snapshot_digest TEXT,
+    record_count INTEGER,
+    page_count INTEGER,
+    file_count INTEGER,
+    root_hash TEXT,
+    file_digest TEXT,
+    storage_dir TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(requested_by, criteria_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_audit_exports_status ON audit_exports(status, id);
 """
 
 PERMISSIONS = [
@@ -343,6 +373,10 @@ PERMISSIONS = [
     ("roles.read", "查看角色", "roles", "read"),
     ("roles.write", "维护角色", "roles", "write"),
     ("audit.read", "查看审计", "audit", "read"),
+    ("audit.export", "申请审计导出", "audit", "export"),
+    ("audit.export.internal_audit", "导出内审视图", "audit", "export_internal_audit"),
+    ("audit.export.legal", "导出法务视图", "audit", "export_legal"),
+    ("audit.export.research_lead", "导出研发负责人视图", "audit", "export_research_lead"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
     ("dossiers.read", "查看档案", "dossiers", "read"),
     ("dossiers.write", "维护档案", "dossiers", "write"),
@@ -435,7 +469,7 @@ def init_db() -> None:
             ],
             "researcher": ["dossiers.read", "dossiers.disclose"],
             "approver": ["dossiers.read", "approvals.decide"],
-            "auditor": ["dossiers.read", "audit.read"],
+            "auditor": ["dossiers.read", "audit.read", "audit.export", "audit.export.internal_audit"],
         }
         for role_code, permission_codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]
