@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -36,10 +36,59 @@ def command_smoke() -> None:
             raise SystemExit(1)
 
 
+def command_verify_export(path: str, expect_digest: str | None = None) -> None:
+    """离线校验审计导出文件：重算行、页与文件摘要，定位篡改或缺页。"""
+    from app.core.export_document import verify_document
+
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(json.dumps({"valid": False, "error": f"无法读取导出文件：{exc}"}, ensure_ascii=False))
+        raise SystemExit(2)
+    issues = verify_document(document)
+    manifest = document.get("manifest") if isinstance(document, dict) else None
+    manifest = manifest if isinstance(manifest, dict) else {}
+    if expect_digest and manifest.get("file_digest") != expect_digest:
+        issues.append(
+            {
+                "kind": "file_digest_mismatch",
+                "page": None,
+                "event_id": None,
+                "expected": expect_digest,
+                "actual": manifest.get("file_digest"),
+                "message": "文件摘要与预期摘要不一致",
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "valid": not issues,
+                "export_code": manifest.get("export_code"),
+                "audience": manifest.get("audience"),
+                "rule_version": manifest.get("rule_version"),
+                "file_digest": manifest.get("file_digest"),
+                "issue_count": len(issues),
+                "issues": issues,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    if issues:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="知识产权档案服务维护命令")
-    parser.add_argument("command", choices=("init-db", "check-db", "smoke"))
+    parser.add_argument("command", choices=("init-db", "check-db", "smoke", "verify-export"))
+    parser.add_argument("path", nargs="?", help="verify-export 待校验的导出文件路径")
+    parser.add_argument("--expect-digest", default=None, help="期望的文件摘要，用于与服务端登记值比对")
     args = parser.parse_args()
+    if args.command == "verify-export":
+        if not args.path:
+            parser.error("verify-export 需要提供导出文件路径")
+        command_verify_export(args.path, expect_digest=args.expect_digest)
+        return
     {"init-db": command_init, "check-db": command_check, "smoke": command_smoke}[args.command]()
 
 

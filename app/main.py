@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import audit, auth, roles, system, users
+from app.api import audit, audit_exports, auth, roles, system, users
 from app.core.errors import DomainError
 from app.database import close_connection, init_db
 from app.archives.router import router as archives_router
@@ -36,6 +36,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(roles.router)
 app.include_router(audit.router)
+app.include_router(audit_exports.router)
 app.include_router(system.router)
 app.include_router(archives_router)
 app.include_router(archive_operations_router)

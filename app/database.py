@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Iterator
 
 from app.core.clock import to_storage, utc_now
+from app.core.export_document import canonical_json
+from app.core.export_rules import RULE_DEFINITION, RULE_VERSION, rule_definition_digest
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "archives.db"
 _local = threading.local()
@@ -335,6 +337,64 @@ CREATE TABLE IF NOT EXISTS dossier_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dossier_events_dossier ON dossier_events(dossier_id, id);
+
+CREATE TABLE IF NOT EXISTS export_rule_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version TEXT NOT NULL UNIQUE,
+    definition_json TEXT NOT NULL,
+    rule_digest TEXT NOT NULL,
+    is_current INTEGER NOT NULL DEFAULT 0 CHECK(is_current IN (0,1)),
+    registered_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_export_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    export_code TEXT NOT NULL UNIQUE,
+    deduplication_key TEXT NOT NULL,
+    audience TEXT NOT NULL CHECK(audience IN ('internal_audit','legal','rd_lead')),
+    filters_json TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    rule_digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed')),
+    snapshot_id INTEGER,
+    row_count INTEGER,
+    page_count INTEGER,
+    file_digest TEXT,
+    document_sha256 TEXT,
+    document_json TEXT,
+    error_message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    requested_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_export_dedup_active
+    ON audit_export_tasks(deduplication_key) WHERE status IN ('pending','running','completed');
+CREATE INDEX IF NOT EXISTS idx_audit_export_status ON audit_export_tasks(status, id);
+
+CREATE TABLE IF NOT EXISTS export_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES audit_export_tasks(id),
+    taken_at TEXT NOT NULL,
+    source_max_event_id INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    rows_digest TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_export_snapshots_task ON export_snapshots(task_id);
+
+CREATE TABLE IF NOT EXISTS export_snapshot_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id INTEGER NOT NULL REFERENCES export_snapshots(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    row_json TEXT NOT NULL,
+    row_digest TEXT NOT NULL,
+    UNIQUE(snapshot_id, ordinal)
+);
 """
 
 PERMISSIONS = [
@@ -353,6 +413,7 @@ PERMISSIONS = [
     ("approvals.decide", "审批高风险操作", "approvals", "decide"),
     ("vaults.read_sensitive", "查看精确密级库位", "vaults", "read_sensitive"),
     ("incidents.manage", "管理泄密事件", "incidents", "manage"),
+    ("audit_exports.manage", "管理审计导出", "audit_exports", "manage"),
 ]
 
 
@@ -435,7 +496,7 @@ def init_db() -> None:
             ],
             "researcher": ["dossiers.read", "dossiers.disclose"],
             "approver": ["dossiers.read", "approvals.decide"],
-            "auditor": ["dossiers.read", "audit.read"],
+            "auditor": ["dossiers.read", "audit.read", "audit_exports.manage"],
         }
         for role_code, permission_codes in role_permissions.items():
             role_id = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()[0]
@@ -445,6 +506,16 @@ def init_db() -> None:
                 f"SELECT ?,id,? FROM permissions WHERE code IN ({placeholders})",
                 (role_id, now, *permission_codes),
             )
+        connection.execute(
+            "INSERT OR IGNORE INTO export_rule_versions(version,definition_json,rule_digest,is_current,registered_by,created_at) "
+            "VALUES(?,?,?,0,NULL,?)",
+            (RULE_VERSION, canonical_json(RULE_DEFINITION), rule_definition_digest(RULE_DEFINITION), now),
+        )
+        connection.execute(
+            "UPDATE export_rule_versions SET is_current=1 WHERE version=? "
+            "AND NOT EXISTS(SELECT 1 FROM export_rule_versions WHERE is_current=1)",
+            (RULE_VERSION,),
+        )
 
 
 def migrate_db() -> None:
